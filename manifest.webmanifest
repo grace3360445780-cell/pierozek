@@ -1,0 +1,17 @@
+{
+  "name": "Pierożek 폴란드어 단어장",
+  "short_name": "Pierożek",
+  "description": "폴란드어 A1–B2 단어와 동사를 간격 반복으로 외우는 단어장",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#FFF6EE",
+  "theme_color": "#FFF6EE",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
