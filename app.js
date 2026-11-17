@@ -6,9 +6,15 @@
   const V = window.VOCAB;
   const W = V.words;   // [pl, ko, levelIdx, topicIdx]
   const VB = V.verbs;  // {f, ko, lv, tp, irr, pair, mot, c, r, g, ex, exKo, n}
+  const SN = (window.SENTENCES || {}).items || [];  // [pl, ko, hint, levelIdx, grammar unit, note, casual?]
+  const SO = (window.SENTENCES || {}).order || SN.map((_, i) => i);  // learning order (ids stay = array index)
+  const stagOf = x => (x[6] ? (x[6] === 1 ? '친구 사이 · 구어' : x[6]) : '');  // situation tag of a sentence
+  const STAGS = [...new Set(SN.map(stagOf).filter(Boolean))];
+  const GU = window.GRAMMAR ? Object.fromEntries(window.GRAMMAR.units.map(u => [u.id, u.t])) : {};
   const LV = V.levels;
+  const PLUG = window.PZ_PLUGINS || [];  // modules loaded before this file (e.g. gram.js)
   const TP = V.topics;
-  const VERSION = '1.0.0';
+  const VERSION = '1.3.3';
 
   /* ---------- utils ---------- */
   const $ = (s, el = document) => el.querySelector(s);
@@ -67,10 +73,10 @@
 
   /* ---------- state ---------- */
   const KEY = 'pierozek.v1';
-  const DEF_SET = { nw: 30, nv: 10, nr: 20, rev: true, lv: [1, 1, 1, 1], order: 'level', auto: true, rate: 0.9, voice: '', theme: 'auto' };
+  const DEF_SET = { nw: 30, nv: 10, nr: 20, ns: 10, rev: true, lv: [1, 1, 1, 1], order: 'level', auto: true, rate: 0.9, voice: '', theme: 'auto' };
   let S;
   // epoch: id of this learning history (changes on reset/import); updated: last change to star/vm/set
-  function freshState() { return { v: 1, epoch: null, reset: 0, updated: 0, c: {}, day: { k: '', nw: 0, nr: 0, nv: 0, rv: 0 }, hist: {}, star: {}, vm: {}, set: { ...DEF_SET } }; }
+  function freshState() { return { v: 1, epoch: null, reset: 0, updated: 0, c: {}, day: { k: '', nw: 0, nr: 0, nv: 0, ns: 0, rv: 0 }, hist: {}, star: {}, vm: {}, set: { ...DEF_SET } }; }
   const newEpoch = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   function load() {
     try {
@@ -80,6 +86,7 @@
     const f = freshState();
     for (const k of Object.keys(f)) if (S[k] === undefined) S[k] = f[k];
     S.set = { ...DEF_SET, ...S.set };
+    S.set.lv = LV.map((_, i) => (S.set.lv[i] === undefined ? 1 : S.set.lv[i]));  // levels added later start switched on
   }
   let warned = false;
   function save(metaChanged) {
@@ -144,7 +151,7 @@
     if (!S.epoch) S.epoch = m.epoch;
     for (const id in remote) { const r = remote[id], l = S.c[id]; if (!l || (r.t || 0) > (l.t || 0)) S.c[id] = r; }
     for (const k in (m.hist || {})) S.hist[k] = Math.max(S.hist[k] || 0, m.hist[k]);
-    if (m.day && m.day.k === S.day.k) for (const f of ['nw', 'nr', 'nv', 'rv']) S.day[f] = Math.max(S.day[f] || 0, m.day[f] || 0);
+    if (m.day && m.day.k === S.day.k) for (const f of ['nw', 'nr', 'nv', 'ns', 'rv']) S.day[f] = Math.max(S.day[f] || 0, m.day[f] || 0);
     else if (m.day && m.day.k > S.day.k) S.day = { ...m.day };
     if ((m.updated || 0) > (S.updated || 0)) { S.star = m.star || {}; S.vm = m.vm || {}; S.set = { ...DEF_SET, ...m.set }; S.updated = m.updated; }
   }
@@ -198,7 +205,7 @@
   const nextDayStart = now => dayStart(dayKey(now), 1);
   function today() {
     const k = dayKey(Date.now());
-    if (S.day.k !== k) S.day = { k, nw: 0, nr: 0, nv: 0, rv: 0 };
+    if (S.day.k !== k) S.day = { k, nw: 0, nr: 0, nv: 0, ns: 0, rv: 0 };
     return S.day;
   }
   function streak() {
@@ -277,6 +284,7 @@
         list.push(...part);
       }
     } else list = idx;
+    if (V.first !== undefined) list = [...list.filter(i => W[i][2] === V.first), ...list.filter(i => W[i][2] !== V.first)];  // basic function words come first
     orderCache = { key, list };
     return list;
   }
@@ -326,6 +334,20 @@
     const d = today();
     const { learn, rev } = dueIds(['w', 'r']);
     return { learn, rev, nf: newWords(S.set.nw - d.nw), nr: newReverse(S.set.nr - d.nr) };
+  }
+  function newSentences(limit) {
+    const out = [];
+    for (let k = 0; k < SO.length && out.length < limit; k++) {
+      const i = SO[k];
+      if (!S.set.lv[SN[i][3]]) continue;
+      if (!S.c['s' + i]) out.push('s' + i);
+    }
+    return out;
+  }
+  function sentPlan() {
+    const d = today();
+    const { learn, rev } = dueIds(['s']);
+    return { learn, rev, nf: newSentences(S.set.ns - (d.ns || 0)), nr: [] };
   }
   function verbPlan() {
     const d = today();
@@ -446,7 +468,7 @@
   function setNav(active) {
     if (!active) { nav.classList.add('hide'); app.classList.add('full'); return; }
     nav.classList.remove('hide'); app.classList.remove('full');
-    const items = [['home', '', I.home, '홈'], ['browse', 'browse', I.book, '단어장'], ['box', 'box', I.heart, '복습함'], ['settings', 'settings', I.gear, '설정']];
+    const items = [['home', '', I.home, '홈'], ['browse', 'browse', I.book, '단어장'], ...PLUG.flatMap(p => p.nav || []), ['box', 'box', I.heart, '복습함'], ['settings', 'settings', I.gear, '설정']];
     nav.innerHTML = items.map(([k, h, ic, t]) => `<button data-go="${h}" class="ni ${k === active ? 'on' : ''}" ${k === active ? 'aria-current="page"' : ''}>${ic}<span>${t}</span></button>`).join('');
   }
 
@@ -463,9 +485,11 @@
       case 'browse': return renderBrowse();
       case 'box': return renderBox();
       case 'settings': return renderSettings();
-      default: return renderHome();
     }
+    for (const p of PLUG) if (p.routes && p.routes[r.name]) return p.routes[r.name](r.args);
+    return renderHome();
   }
+  const plugHtml = hook => PLUG.map(p => (p[hook] ? p[hook]() : '')).join('');
 
   /* ---------- home ---------- */
   function renderHome() {
@@ -481,55 +505,94 @@
       : started ? `Super! 오늘 ${fmtN(d.rv)}장 했어요. 조금만 더!` : 'Cześć! 오늘도 같이 외워 볼까요?';
     const known = W.filter((_, i) => status('w' + i) >= 2).length;
 
+    // level progress for the chosen deck (words / verbs / sentences)
+    const deck = { w: [W, x => x[2], 'w'], v: [VB, x => x.lv, 'v'], s: [SN, x => x[3], 's'] }[homeTab] || [W, x => x[2], 'w'];
     let lvHtml = '';
     for (let l = 0; l < LV.length; l++) {
-      const ids = []; W.forEach((w, i) => { if (w[2] === l) ids.push(i); });
+      const ids = []; deck[0].forEach((x, i) => { if (deck[1](x) === l) ids.push(i); });
+      if (!ids.length) continue;
       let s1 = 0, s2 = 0, s3 = 0;
-      for (const i of ids) { const s = status('w' + i); if (s === 3) s1++; else if (s === 2) s2++; else if (s === 1) s3++; }
+      for (const i of ids) { const s = status(deck[2] + i); if (s === 3) s1++; else if (s === 2) s2++; else if (s === 1) s3++; }
       const t = ids.length, p = x => (x / t * 100).toFixed(2) + '%';
-      lvHtml += `<div class="lvrow"><span class="lv">${LV[l]}</span><div class="bar"><i class="b1" style="width:${p(s1)}"></i><i class="b2" style="width:${p(s2)}"></i><i class="b3" style="width:${p(s3)}"></i></div><span class="num">${fmtN(s1 + s2)} / ${fmtN(t)}</span></div>`;
+      lvHtml += `<div class="lvrow"><span class="lv${/^[A-C]\d$/.test(LV[l]) ? '' : ' ko'}">${LV[l]}</span><div class="bar"><i class="b1" style="width:${p(s1)}"></i><i class="b2" style="width:${p(s2)}"></i><i class="b3" style="width:${p(s3)}"></i></div><span class="num">${fmtN(s1 + s2)} / ${fmtN(t)}</span></div>`;
     }
+    const tabs = [['w', '단어'], ['v', '동사']].concat(SN.length ? [['s', '문장']] : []);
 
-    app.innerHTML = `
-      <div class="top"><div class="hello">${pierog(72, wTotal + vTotal === 0 && started ? 'joy' : 'happy')}<div class="bubble">${esc(msg)}</div></div></div>
-      <div class="home-grid">
-        <section class="card">
+    // backup reminder: once there is real progress and no export for 14 days (snooze 7 days)
+    const now = Date.now(), DAY = 864e5, nCards = Object.keys(S.c).length;
+    const needBk = nCards >= 50 && now - (S.exp || S.reset || 0) > 14 * DAY && now - (S.bkSnooze || 0) > 7 * DAY;
+    const bk = needBk ? `<section class="card bkwarn"><span class="emoji">💾</span><div style="flex:1"><b>기록을 백업해 둘까요?</b><span class="small muted">${S.exp ? `마지막 백업 ${Math.floor((now - S.exp) / DAY)}일 전` : '아직 한 번도 백업하지 않았어요'} · 기록은 이 기기에만 있어요</span></div>
+      <div class="bkbtns"><button class="tag mint" data-act="export">내보내기</button><button class="tag" data-act="bklater">나중에</button></div></section>` : '';
+
+    // today's cards: unfinished first, finished ones folded into small chips at the bottom
+    const vLearned = VB.filter((_, i) => S.c['v' + i]).length;
+    const cards = [
+      { done: !wTotal, name: '오늘의 단어', go: 'study/words', html: `<section class="card">
           <h2>오늘의 단어 <span class="tag coral">하루 ${S.set.nw}개</span></h2>
           <div class="stats3">
             <div class="stat coral"><b>${wp.nf.length}</b><span>새 단어</span></div>
             <div class="stat lilac"><b>${wp.nr.length}</b><span>말하기 연습</span></div>
             <div class="stat mint"><b>${wDue}</b><span>복습</span></div>
           </div>
-          <button class="btn" data-go="study/words" ${wTotal ? '' : 'disabled'}>${wTotal ? '학습 시작' : '오늘 분량 끝!'}</button>
-        </section>
-        <section class="card">
+          <button class="btn" data-go="study/words">학습 시작</button>
+        </section>` },
+      { done: !vTotal, name: '동사', go: 'study/verbs', html: `<section class="card">
           <h2>동사 <span class="tag sky">하루 ${S.set.nv}개</span></h2>
           <div class="stats3">
             <div class="stat sky"><b>${vp.nf.length}</b><span>새 동사</span></div>
             <div class="stat mint"><b>${vDue}</b><span>복습</span></div>
-            <div class="stat butter"><b>${fmtN(VB.filter((_, i) => S.c['v' + i]).length)}</b><span>배운 동사</span></div>
+            <div class="stat butter"><b>${fmtN(vLearned)}</b><span>배운 동사</span></div>
           </div>
           <div class="row2">
-            <button class="btn sky" data-go="study/verbs" ${vTotal ? '' : 'disabled'}>${vTotal ? '동사 카드' : '오늘 끝!'}</button>
+            <button class="btn sky" data-go="study/verbs">동사 카드</button>
             <button class="btn lilac" data-go="quiz">활용 퀴즈</button>
           </div>
-        </section>
+        </section>` },
+    ];
+    if (SN.length) { const sp = sentPlan(); cards.push({ done: !(sp.learn.length + sp.rev.length + sp.nf.length), name: '오늘의 문장', go: 'study/sentences', html: sentCard() }); }
+    const todo = cards.filter(c => !c.done), fin = cards.filter(c => c.done);
+    const finHtml = fin.length ? `<div class="findone">${fin.map(c => `<button class="finchip" data-go="${c.go}"><span>✓</span>${c.name} 끝</button>`).join('')}</div>` : '';
+
+    app.innerHTML = `
+      <div class="top"><div class="hello">${pierog(72, wTotal + vTotal === 0 && started ? 'joy' : 'happy')}<div class="bubble">${esc(msg)}</div></div></div>
+      ${bk}
+      <div class="home-grid">
+        ${todo.map(c => c.html).join('')}
+        ${plugHtml('home')}
       </div>
+      ${finHtml}
       <div class="streak" style="margin-top:16px">
         <div class="card"><span class="emoji">🔥</span><div><div class="big">${st}<span class="small muted"> 일</span></div><div class="small muted">연속 학습</div></div></div>
         <div class="card"><span class="emoji">🥟</span><div><div class="big">${fmtN(known)}</div><div class="small muted">익힌 단어</div></div></div>
       </div>
       <section class="card">
         <h2>레벨별 진도</h2>
+        <div class="seg">${tabs.map(([k, t]) => `<button class="${homeTab === k ? 'on' : ''}" data-hp="${k}">${t}</button>`).join('')}</div>
         ${lvHtml}
         <div class="legend"><span><i style="background:var(--mint)"></i>장기 기억</span><span><i style="background:#A9E5CB"></i>익히는 중</span><span><i style="background:var(--butter)"></i>배우는 중</span></div>
       </section>`;
+  }
+  let homeTab = 'w';
+  function sentCard() {
+    if (!SN.length) return '';
+    const sp = sentPlan(), due = sp.learn.length + sp.rev.length, tot = due + sp.nf.length;
+    const learned = SN.filter((_, i) => S.c['s' + i]).length;
+    return `<section class="card">
+          <h2>오늘의 문장 <span class="tag butter">하루 ${S.set.ns}개</span></h2>
+          <div class="stats3">
+            <div class="stat butter"><b>${sp.nf.length}</b><span>새 문장</span></div>
+            <div class="stat mint"><b>${due}</b><span>복습</span></div>
+            <div class="stat lilac"><b>${fmtN(learned)}</b><span>배운 문장</span></div>
+          </div>
+          <button class="btn" data-go="study/sentences" ${tot ? '' : 'disabled'}>${tot ? '문장 카드' : '오늘 분량 끝!'}</button>
+        </section>`;
   }
 
   /* ---------- study session (spaced repetition) ---------- */
   function buildSession(kind, args) {
     let plan, filter = null, label;
     if (kind === 'verbs') { plan = verbPlan(); label = '동사'; }
+    else if (kind === 'sentences') { plan = sentPlan(); label = '오늘의 문장'; }
     else if (kind === 'topic') {
       const lv = +args[0], tp = +args[1];
       filter = i => W[i][2] === lv && W[i][3] === tp;
@@ -567,9 +630,14 @@
     const nNew = s.main.filter(x => !S.c[x]).length + (!c ? 1 : 0);
     const nLearn = s.learn.length;
     const nRev = remain - nNew - nLearn;
-    const starKey = p === 'v' ? id : 'w' + i;
+    const starKey = p === 'v' || p === 's' ? id : 'w' + i;
     let meta = '', front = '', back = '';
-    if (p === 'v') {
+    if (p === 's') {
+      const x = SN[i];
+      meta = `<span class="tag">${LV[x[3]]}</span>${x[6] ? `<span class="tag mint">${esc(x[6] === 1 ? '친구 사이 · 구어' : x[6])}</span>` : ''}${GU[x[4]] ? `<span class="tag lilac">${esc(GU[x[4]])}</span>` : ''}${!c ? '<span class="tag coral">새 문장</span>' : ''}`;
+      front = `<div class="kword" style="font-size:clamp(21px,5.6vw,27px)">${esc(x[1])}</div>${x[2] ? `<div class="shint">${x[2].split(/,\s*/).map(h => `<span>${esc(h)}</span>`).join('')}</div>` : ''}<div class="ask">폴란드어로 말해 보세요</div>`;
+      back = `<div class="pl ssent">${esc(x[0])}</div><div style="margin-top:10px"><button class="say" data-say="${esc(x[0])}">${I.speak}다시 듣기</button></div>${x[5] ? `<div class="box note" style="text-align:left"><span class="lab">문법</span>${esc(x[5])}</div>` : ''}`;
+    } else if (p === 'v') {
       const v = VB[i];
       meta = `<span class="tag">${LV[v.lv]}</span><span class="tag">${esc(TP[v.tp])}</span>${!c ? '<span class="tag coral">새 동사</span>' : ''}`;
       front = `<div class="vhead word ${v.f.length > 1 ? 'long' : ''}">${verbHead(v)}</div><div>${verbTags(v)}</div>
@@ -605,7 +673,7 @@
         ? `<div class="rates">${[1, 2, 3, 4].map(r => `<button class="rate r${r}" data-rate="${r}">${['다시', '어려움', '알맞음', '쉬움'][r - 1]}<small>${ivlLabel(c, r, now)}</small></button>`).join('')}</div>`
         : `<div class="tap">카드를 눌러 정답 보기</div><div style="margin-top:12px"><button class="btn ghost" data-act="flip">정답 보기</button></div>`}
       <div class="under">${s.undo.length ? `<button class="link" data-act="undo">${I.undo}되돌리기</button>` : ''}</div>`;
-    if (!s.shown && S.set.auto && p !== 'r' && s.spoken !== id) { s.spoken = id; speak(p === 'v' ? verbSay(VB[i]) : W[i][0]); }
+    if (!s.shown && S.set.auto && p !== 'r' && p !== 's' && s.spoken !== id) { s.spoken = id; speak(p === 'v' ? verbSay(VB[i]) : W[i][0]); }
   }
   function flip() {
     const s = session;
@@ -614,6 +682,7 @@
     drawStudy();
     const p = s.cur[0], i = +s.cur.slice(1);
     if (p === 'r' && S.set.auto) speak(W[i][0]);
+    if (p === 's' && S.set.auto) speak(SN[i][0], true);
   }
   function rate(r) {
     const s = session;
@@ -623,7 +692,7 @@
     if (s.undo.length > 20) s.undo.shift();
     const was = S.c[id];
     const nc = schedule(was, r, now, true);
-    if (!was) { if (id[0] === 'w') d.nw++; else if (id[0] === 'r') d.nr++; else d.nv++; }
+    if (!was) { if (id[0] === 'w') d.nw++; else if (id[0] === 'r') d.nr++; else if (id[0] === 's') d.ns = (d.ns || 0) + 1; else d.nv++; }
     d.rv++;
     S.c[id] = nc;
     S.hist[hk] = (S.hist[hk] || 0) + 1;
@@ -661,7 +730,7 @@
   }
 
   /* ---------- cram (review box, schedule untouched) ---------- */
-  function cramIds(kind) {
+  function cramIds(kind, arg) {
     const out = [];
     const hk = dayStart(dayKey(Date.now()));
     if (kind === 'star') { for (const k in S.star) if (S.star[k]) out.push(k); }
@@ -671,16 +740,20 @@
     } else if (kind === 'today') {
       W.forEach((_, i) => { const a = S.c['w' + i], b = S.c['r' + i]; if ((a && a.a >= hk) || (b && b.a >= hk)) out.push('w' + i); });
       VB.forEach((_, i) => { const a = S.c['v' + i]; if (a && a.a >= hk) out.push('v' + i); });
+    } else if (kind === 'sent') {
+      SN.forEach((_, i) => { const a = S.c['s' + i]; if (a && (a.l >= 2 || a.a >= hk)) out.push('s' + i); });
+    } else if (kind === 'tag') {
+      SN.forEach((x, i) => { if (stagOf(x) === STAGS[arg]) out.push('s' + i); });
     }
     return out;
   }
-  const CRAM_NAME = { star: '별표 단어', leech: '자주 틀린 단어', today: '오늘 틀린 단어' };
+  const CRAM_NAME = { star: '별표', leech: '자주 틀린 단어', today: '오늘 틀린 단어', sent: '틀린 문장' };
   function renderCram(args) {
     setNav(null);
-    const kind = args[0];
-    if (!session || session.kind !== 'cram-' + kind) {
-      const ids = shuffle(cramIds(kind));
-      session = { kind: 'cram-' + kind, label: CRAM_NAME[kind], main: ids, total: ids.length, done: 0, cur: ids.shift() || null, shown: false };
+    const kind = args[0], arg = +args[1] || 0, key = 'cram-' + kind + (kind === 'tag' ? arg : '');
+    if (!session || session.kind !== key) {
+      const ids = shuffle(cramIds(kind, arg));
+      session = { kind: key, back: kind === 'tag' ? 'browse' : 'box', label: kind === 'tag' ? STAGS[arg] : CRAM_NAME[kind], main: ids, total: ids.length, done: 0, cur: ids.shift() || null, shown: false };
       session.main = ids;
     }
     drawCram();
@@ -690,12 +763,17 @@
     if (!s.cur) {
       app.innerHTML = `<div class="done">${pierog(120, 'joy')}<h2>${s.total ? '한 바퀴 끝!' : '아직 모인 단어가 없어요'}</h2>
         <p class="muted">${s.total ? `${esc(s.label)} ${s.total}개를 모두 확인했어요.` : '공부하다 보면 여기에 차곡차곡 모여요.'}</p>
-        <div style="display:grid;gap:10px;margin-top:22px"><button class="btn" data-go="box">복습함으로</button></div></div>`;
+        <div style="display:grid;gap:10px;margin-top:22px"><button class="btn" data-go="${s.back}">${s.back === 'box' ? '복습함으로' : '단어장으로'}</button></div></div>`;
       return;
     }
     const id = s.cur, p = id[0], i = +id.slice(1);
     let front, back, meta;
-    if (p === 'v') {
+    if (p === 's') {
+      const x = SN[i];
+      meta = `<span class="tag">${LV[x[3]]}</span><span class="tag">문장</span>${stagOf(x) ? `<span class="tag mint">${esc(stagOf(x))}</span>` : ''}`;
+      front = `<div class="kword" style="font-size:clamp(21px,5.6vw,27px)">${esc(x[1])}</div>${x[2] ? `<div class="shint">${esc(x[2])}</div>` : ''}`;
+      back = `<div class="pl ssent">${esc(x[0])}</div><div style="margin-top:10px"><button class="say" data-say="${esc(x[0])}">${I.speak}듣기</button></div>${x[5] ? `<div class="box note" style="text-align:left"><span class="lab">문법</span>${esc(x[5])}</div>` : ''}`;
+    } else if (p === 'v') {
       const v = VB[i];
       meta = `<span class="tag">${LV[v.lv]}</span><span class="tag">동사</span>`;
       front = `<div class="vhead word ${v.f.length > 1 ? 'long' : ''}">${verbHead(v)}</div><button class="say" data-say="${esc(verbSay(v))}">${I.speak}발음</button>`;
@@ -708,7 +786,7 @@
     }
     const pct = s.done / Math.max(1, s.total) * 100;
     app.innerHTML = `
-      <div class="sbar"><button class="iconbtn" data-go="box" aria-label="그만하기">${I.x}</button><div class="prog"><i style="width:${pct}%"></i></div>
+      <div class="sbar"><button class="iconbtn" data-go="${s.back}" aria-label="그만하기">${I.x}</button><div class="prog"><i style="width:${pct}%"></i></div>
         <button class="iconbtn ${S.star[id] ? 'on' : ''}" data-star="${id}" aria-label="별표">${I.star}</button></div>
       <div class="qcounts"><span class="tag butter">${esc(s.label)}</span><span class="tag">${s.done} / ${s.total}</span></div>
       <div class="flash" data-act="cflip"><div class="meta">${meta}</div><div class="front">${front}</div>${s.shown ? `<div class="back">${back}</div>` : ''}</div>
@@ -839,7 +917,8 @@
   }
 
   /* ---------- browse ---------- */
-  const ui = { tab: 'w', lv: 0, tp: -1, q: '', lim: 120 };
+  const LIM = 50;
+  const ui = { tab: 'w', lv: 0, tp: -1, q: '', lim: LIM };
   function browseList() {
     const q = norm(ui.q.trim());
     const res = [];
@@ -847,6 +926,13 @@
       W.forEach((w, i) => {
         if (q) { if (!norm(w[0]).includes(q) && !w[1].includes(ui.q.trim())) return; }
         else { if (w[2] !== ui.lv) return; if (ui.tp >= 0 && w[3] !== ui.tp) return; }
+        res.push(i);
+      });
+    } else if (ui.tab === 's') {
+      SN.forEach((x, i) => {
+        if (q) { if (!norm(x[0]).includes(q) && !x[1].includes(ui.q.trim())) return; }
+        else if (ui.tp >= 0) { if (stagOf(x) !== STAGS[ui.tp]) return; }  // situation chip: all levels
+        else if (x[3] !== ui.lv) return;
         res.push(i);
       });
     } else {
@@ -873,8 +959,14 @@
     const res = browseList();
     const searching = !!ui.q.trim();
     const tps = [];
-    (ui.tab === 'w' ? W.map(w => [w[2], w[3]]) : VB.map(v => [v.lv, v.tp])).forEach(([l, t]) => { if (l === ui.lv && !tps.includes(t)) tps.push(t); });
+    const isS = ui.tab === 's', tpName = t => (isS ? STAGS[t] : TP[t]);
+    if (isS) STAGS.forEach((_, t) => tps.push(t));
+    else (ui.tab === 'w' ? W.map(w => [w[2], w[3]]) : VB.map(v => [v.lv, v.tp])).forEach(([l, t]) => { if (l === ui.lv && !tps.includes(t)) tps.push(t); });
     const rows = res.slice(0, ui.lim).map(i => {
+      if (isS) {
+        const x = SN[i];
+        return `<div class="item" data-say="${esc(x[0])}"><span class="dot s${status('s' + i)}"></span><div class="t"><span class="pl">${esc(x[0])}</span><span class="k">${esc(x[1])}${ui.tp >= 0 ? ` · ${LV[x[3]]}` : ''}</span></div><button class="star ${S.star['s' + i] ? 'on' : ''}" data-star="s${i}" aria-label="별표">${I.star}</button></div>`;
+      }
       if (ui.tab === 'w') {
         const w = W[i];
         return `<div class="item" data-open="w${i}"><span class="dot s${status('w' + i)}"></span><div class="t"><span class="pl">${fmtPl(w[0])}</span><span class="k">${esc(w[1])}</span></div><button class="star ${S.star['w' + i] ? 'on' : ''}" data-star="w${i}" aria-label="별표">${I.star}</button></div>`;
@@ -883,12 +975,14 @@
       return `<div class="item" data-open="v${i}"><span class="dot s${status('v' + i)}"></span><div class="t"><span class="pl">${esc(v.f.map(f => f[0]).join(' / '))}</span><span class="k">${esc(v.ko)}</span></div><button class="star ${S.star['v' + i] ? 'on' : ''}" data-star="v${i}" aria-label="별표">${I.star}</button></div>`;
     }).join('');
     box.innerHTML = `
-      <div class="seg"><button class="${ui.tab === 'w' ? 'on' : ''}" data-tab="w">단어 ${fmtN(W.length)}</button><button class="${ui.tab === 'v' ? 'on' : ''}" data-tab="v">동사 ${fmtN(VB.length)}</button></div>
+      <div class="seg"><button class="${ui.tab === 'w' ? 'on' : ''}" data-tab="w">단어 ${fmtN(W.length)}</button><button class="${ui.tab === 'v' ? 'on' : ''}" data-tab="v">동사 ${fmtN(VB.length)}</button>${SN.length ? `<button class="${ui.tab === 's' ? 'on' : ''}" data-tab="s">문장 ${fmtN(SN.length)}</button>` : ''}</div>
       ${searching ? '' : `
-        <div class="seg">${LV.map((l, i) => `<button class="${ui.lv === i ? 'on' : ''}" data-lv="${i}">${l}</button>`).join('')}</div>
-        <div class="chips"><button class="chip ${ui.tp < 0 ? 'on' : ''}" data-tp="-1">전체</button>${tps.map(t => `<button class="chip ${ui.tp === t ? 'on' : ''}" data-tp="${t}">${esc(TP[t])}</button>`).join('')}</div>`}
+        <div class="seg">${LV.map((l, i) => `<button class="${ui.lv === i && !(isS && ui.tp >= 0) ? 'on' : ''}" data-lv="${i}">${l}</button>`).join('')}</div>
+        ${isS ? '<p class="small muted" style="margin:2px 4px 8px">상황을 고르면 모든 레벨의 문장을 모아 보여 줘요</p>' : ''}
+        <div class="chips"><button class="chip ${ui.tp < 0 ? 'on' : ''}" data-tp="-1">${isS ? '레벨별' : '전체'}</button>${tps.map(t => `<button class="chip ${ui.tp === t ? 'on' : ''}" data-tp="${t}">${esc(tpName(t))}</button>`).join('')}</div>`}
       <div class="listhead"><span class="muted">${searching ? `검색 결과 ${fmtN(res.length)}개` : `${fmtN(res.length)}개`}</span>
-        ${!searching && ui.tab === 'w' && ui.tp >= 0 ? `<button class="tag coral" data-go="study/topic/${ui.lv}/${ui.tp}" style="padding:7px 14px;font-size:14px">이 주제 학습하기</button>` : ''}</div>
+        ${!searching && ui.tab === 'w' && ui.tp >= 0 ? `<button class="tag coral" data-go="study/topic/${ui.lv}/${ui.tp}" style="padding:7px 14px;font-size:14px">이 주제 학습하기</button>` : ''}
+        ${!searching && isS && ui.tp >= 0 ? `<button class="tag coral" data-go="cram/tag/${ui.tp}" style="padding:7px 14px;font-size:14px">이 상황 카드로 연습</button>` : ''}</div>
       ${res.length ? `<div class="list">${rows}</div>` : `<div class="empty">${pierog(70, 'sleep')}<p>찾는 단어가 없어요</p></div>`}
       ${res.length > ui.lim ? `<button class="more" data-act="more" style="width:100%">더 보기 (${fmtN(res.length - ui.lim)}개 남음)</button>` : ''}`;
   }
@@ -928,7 +1022,8 @@
   /* ---------- review box ---------- */
   function renderBox() {
     setNav('box');
-    const items = [['star', '⭐', '별표 단어', '직접 별표한 단어와 동사'], ['leech', '🌀', '자주 틀린 단어', '두 번 이상 틀린 단어 · 퀴즈에서 자주 틀린 동사'], ['today', '📌', '오늘 틀린 단어', "오늘 '다시'를 누른 단어"]];
+    const items = [['star', '⭐', '별표', '직접 별표한 단어 · 동사 · 문장'], ['leech', '🌀', '자주 틀린 단어', '두 번 이상 틀린 단어 · 퀴즈에서 자주 틀린 동사'], ['today', '📌', '오늘 틀린 단어', "오늘 '다시'를 누른 단어와 동사"]];
+    if (SN.length) items.push(['sent', '💬', '틀린 문장', "두 번 이상 틀렸거나 오늘 '다시'를 누른 문장"]);
     app.innerHTML = `
       <div class="top"><h1>복습함</h1></div>
       <p class="muted" style="margin:-8px 4px 16px">따로 모아서 한 번 더 보는 곳이에요. 여기서 보는 건 복습 일정에 영향을 주지 않아요.</p>
@@ -937,7 +1032,7 @@
         return `<button class="card" data-go="cram/${k}" style="display:flex;align-items:center;gap:14px;width:100%;text-align:left" ${n ? '' : 'disabled'}>
           <span class="emoji">${e}</span><span style="flex:1"><b style="font-family:var(--fk);font-weight:400;font-size:18px;display:block">${t}</b><span class="small muted">${d}</span></span>
           <span class="stat ${n ? 'coral' : ''}" style="min-width:56px;padding:6px"><b style="font-size:22px">${n}</b></span></button>`;
-      }).join('')}`;
+      }).join('')}${plugHtml('box')}`;
   }
 
   /* ---------- settings ---------- */
@@ -954,12 +1049,13 @@
         <h2 style="margin-bottom:6px">하루 학습량</h2>
         <div class="set"><div class="t"><b>새 단어</b><span>하루에 새로 배울 단어 수</span></div>${stepper('nw', 5, 0, 200)}</div>
         <div class="set"><div class="t"><b>새 동사</b><span>동사 카드로 새로 배울 동사 수</span></div>${stepper('nv', 1, 0, 50)}</div>
+        <div class="set"><div class="t"><b>새 문장</b><span>하루에 새로 익힐 일상 문장 수</span></div>${stepper('ns', 5, 0, 60)}</div>
         <div class="set"><div class="t"><b>말하기 연습</b><span>익숙해진 단어를 한국어 → 폴란드어로 떠올리는 카드</span></div>${toggle('rev', S.set.rev)}</div>
         ${S.set.rev ? `<div class="set"><div class="t"><b>말하기 연습 새 카드</b><span>하루에 새로 추가할 말하기 카드 수</span></div>${stepper('nr', 5, 0, 200)}</div>` : ''}
       </section>
       <section class="card">
         <h2 style="margin-bottom:6px">학습 범위</h2>
-        <div class="set"><div class="t"><b>레벨</b><span>새 단어와 새 동사를 꺼낼 레벨</span></div>
+        <div class="set"><div class="t"><b>레벨</b><span>새 카드를 꺼낼 레벨 (단어 · 동사 · 문장)</span></div>
           <div style="display:flex;gap:6px">${LV.map((l, i) => `<button class="chip ${S.set.lv[i] ? 'on' : ''}" data-lvl="${i}">${l}</button>`).join('')}</div></div>
         <div class="set"><div class="t"><b>새 단어 순서</b><span>레벨 안에서 주제 순서대로, 또는 섞어서</span></div>
           <select class="sel" data-sel="order"><option value="level" ${S.set.order === 'level' ? 'selected' : ''}>주제 순서</option><option value="shuffle" ${S.set.order === 'shuffle' ? 'selected' : ''}>섞어서</option></select></div>
@@ -985,6 +1081,7 @@
         <div class="row2"><button class="btn mint" data-act="export">내보내기</button><button class="btn sky" data-act="import">불러오기</button></div>
         <input id="file" type="file" accept="application/json,.json" class="hide">
       </section>
+      ${plugHtml('settings')}
       <section class="card">
         <h2 style="margin-bottom:6px">정보</h2>
         <p class="small muted" style="margin:0">단어 ${fmtN(W.length)}개 · 동사 ${fmtN(VB.length)}개 (A1–B2)<br>한국어 뜻과 동사 예문은 AI가 작성한 것이라 사전과 함께 확인해 주세요.<br>버전 ${VERSION}</p>
@@ -1021,7 +1118,7 @@
     let dl = null;
     if (window.claude && typeof window.claude.use === 'function') { try { dl = await window.claude.use('downloads'); } catch (e) { dl = null; } }
     if (dl) {
-      try { await dl.save({ filename, data: json }); toast('기록 파일을 저장했어요'); }
+      try { await dl.save({ filename, data: json }); S.exp = Date.now(); save(true); toast('기록 파일을 저장했어요'); if (route().name === 'home') render(); }
       catch (e) { if (e && e.code !== 'declined') toast('파일을 저장하지 못했어요'); }
       return;
     }
@@ -1030,7 +1127,7 @@
     a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    toast('기록 파일을 저장했어요');
+    S.exp = Date.now(); save(true); toast('기록 파일을 저장했어요'); if (route().name === 'home') render();
   }
   function importData(file) {
     const rd = new FileReader();
@@ -1055,7 +1152,7 @@
 
   /* ---------- events ---------- */
   document.addEventListener('click', e => {
-    const t = e.target.closest('[data-ask],[data-say],[data-say-ex],[data-star],[data-go],[data-act],[data-rate],[data-cram],[data-quiz],[data-pick],[data-tab],[data-lv],[data-tp],[data-open],[data-step],[data-tog],[data-lvl]');
+    const t = e.target.closest('[data-ask],[data-say],[data-say-ex],[data-star],[data-go],[data-act],[data-rate],[data-cram],[data-quiz],[data-pick],[data-tab],[data-lv],[data-tp],[data-open],[data-step],[data-tog],[data-lvl],[data-hp]');
     if (!t) return;
     const ds = t.dataset;
     if (ds.ask !== undefined) { closeSheet(); if (askDone) { const f = askDone; askDone = null; f(ds.ask === '1'); } return; }
@@ -1074,9 +1171,10 @@
     if (ds.cram) return cramAnswer(ds.cram === '1');
     if (ds.quiz !== undefined) { if (t.disabled) return; quiz = makeQuiz(ds.quiz); if (!quiz.qs.length) { toast('문제를 만들 동사가 부족해요'); quiz = null; return drawQuizStart(); } return drawQuiz(); }
     if (ds.pick) return pick(+ds.pick);
-    if (ds.tab) { ui.tab = ds.tab; ui.tp = -1; ui.lim = 120; return updateBrowse(); }
-    if (ds.lv) { ui.lv = +ds.lv; ui.tp = -1; ui.lim = 120; return updateBrowse(); }
-    if (ds.tp) { ui.tp = +ds.tp; ui.lim = 120; return updateBrowse(); }
+    if (ds.hp) { homeTab = ds.hp; return render(); }
+    if (ds.tab) { ui.tab = ds.tab; ui.tp = -1; ui.lim = LIM; return updateBrowse(); }
+    if (ds.lv) { ui.lv = +ds.lv; ui.tp = -1; ui.lim = LIM; return updateBrowse(); }
+    if (ds.tp) { ui.tp = +ds.tp; ui.lim = LIM; return updateBrowse(); }
     if (ds.open) return openSheet(ds.open);
     if (ds.step) {
       const k = ds.step; S.set[k] = clamp(S.set[k] + +ds.d, +ds.min, +ds.max); save(true); return renderSettings();
@@ -1093,9 +1191,10 @@
       case 'undo': return undo();
       case 'quit': return go('');
       case 'qnext': quiz.at++; quiz.picked = null; return drawQuiz();
-      case 'more': ui.lim += 200; return updateBrowse();
+      case 'more': ui.lim += 100; return updateBrowse();
       case 'close': return closeSheet();
       case 'export': return exportData();
+      case 'bklater': S.bkSnooze = Date.now(); save(true); return render();
       case 'import': return $('#file').click();
       case 'extra': S.day.nw = Math.max(0, S.day.nw - 10); save(); session = null; return go('study/words');
       case 'reset': return resetAll();
@@ -1114,7 +1213,7 @@
   let qTimer;
   document.addEventListener('input', e => {
     if (e.target.id !== 'q') return;
-    ui.q = e.target.value; ui.lim = 120;
+    ui.q = e.target.value; ui.lim = LIM;
     clearTimeout(qTimer); qTimer = setTimeout(updateBrowse, 180);
   });
   document.addEventListener('keydown', e => {
@@ -1144,6 +1243,12 @@
   if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !framed && !window.claude) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
+  // plugins (grammar module) get a small core API before the first render
+  window.PZ = {
+    get S() { return S; }, save, go, route, render, setNav, closeSheet, ask, speak, toast, pierog, esc, fmtN, shuffle, clamp,
+    dayKey, dayStart, today, I, app,
+  };
+  for (const p of PLUG) if (p.init) p.init(window.PZ);
   render();
   initSync();
 

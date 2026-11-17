@@ -1,6 +1,6 @@
 /* offline cache: app files are served from cache first, refreshed in the background */
-const CACHE = 'pierozek-v1.0.0';
-const FILES = ['./', 'index.html', 'app.js', 'data.js', 'manifest.webmanifest',
+const CACHE = 'pierozek-v1.3.3';
+const FILES = ['./', 'index.html', 'app.js', 'data.js', 'grammar.js', 'gram.js', 'sent.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
